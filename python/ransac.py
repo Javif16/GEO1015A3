@@ -22,73 +22,53 @@ def detect(lazfile, params, viz=False):
         rr.log("allpts", rr.Points3D(pts, colors=[78, 205, 189], radii=0.1))
 
     def fit_plane(points):
-        """Fit a plane using three points."""
-        p1, p2, p3 = points
-        normal = np.cross(p2 - p1, p3 - p1)
-        normal /= np.linalg.norm(normal)  # Normalize the normal vector
-        d = -np.dot(normal, p1)
-        return normal, d
-        # this function might yield wrong planes
-        # collinear points or very close one can produce innacurate normals
+        """Fit a plane using SVD."""
+        centroid = np.mean(points, axis=0)
+        _, _, vh = np.linalg.svd(points - centroid)
+        normal = vh[2, :]
+        d = -np.dot(normal, centroid)
+        return np.append(normal, d)
 
-    def calculate_distance(points, plane):
-        """Calculate the perpendicular distance of points to a plane."""
-        normal, d = plane
-        return np.abs(np.dot(points, normal) + d) / np.linalg.norm(normal)
+    def ransac_plane(points, threshold, iterations):
+        """RANSAC for plane detection."""
+        best_inliers = []
+        best_params = None
 
-    def score_inliers(points, plane, epsilon):
-        """Calculate inliers for a given plane."""
-        distances = calculate_distance(points, plane)
-        return distances < epsilon  # Return a mask of inliers
+        for _ in range(iterations):
+            sample = points[np.random.choice(points.shape[0], 3, replace=False)]
+            params = fit_plane(sample)
+            inliers = []
 
-    def validate_cluster(cluster, plane, epsilon, min_cluster_size):
-        """Ensure clusters are valid by size and proximity."""
-        if cluster.shape[0] < min_cluster_size:
-            return False
-        distances = calculate_distance(cluster, plane)
-        if np.max(distances) > epsilon * 2:  # Avoid overly large deviations
-            return False
-        return True
-    # overly strict validation can discard valid clusters
-    # fine-tune min_cluster_size and distance thresholds
+            for point in points:
+                distance = np.abs(np.dot(params[:3], point) + params[3]) / np.linalg.norm(params[:3])
+                if distance < threshold:
+                    inliers.append(point)
+
+            if len(inliers) > len(best_inliers):
+                best_inliers = inliers
+                best_params = params
+
+        return best_params, np.array(best_inliers)
 
     remaining_pts = np.copy(pts)
 
     while remaining_pts.shape[0] > min_score:
-        best_score = 0
-        best_plane = None
-        best_inliers = None
-    # implement mechanims to exclude recently processed points
+        best_params, best_inliers = ransac_plane(remaining_pts, epsilon, max_iterations)
 
-        for _ in range(max_iterations):
-            # Sample 3 random points to fit a plane
-            sample_indices = np.random.choice(remaining_pts.shape[0], 3, replace=False)
-            sample = remaining_pts[sample_indices]
-            plane = fit_plane(sample)
+        if len(best_inliers) > min_score:
+            # Assign a segment ID to the inliers
+            for point in best_inliers:
+                idx = np.where((pts == point).all(axis=1))[0]
+                segment_ids[idx] = segment_id
 
-            inliers_mask = score_inliers(remaining_pts, plane, epsilon)
-            inliers_pts = remaining_pts[inliers_mask]
+            if viz:
+                color = [random.randint(50, 255) for _ in range(3)]
+                rr.log(f"plane_{segment_id}", rr.Points3D(best_inliers, colors=color, radii=0.1))
 
-            if inliers_pts.shape[0] > best_score:
-                best_score = inliers_pts.shape[0]
-                best_plane = plane
-                best_inliers = inliers_pts
-
-        if best_plane and best_score > min_score:
-            # Validate and cluster inliers
-            if validate_cluster(best_inliers, best_plane, epsilon, min_score):
-                for point in best_inliers:
-                    idx = np.where((pts == point).all(axis=1))[0]
-                    segment_ids[idx] = segment_id
-
-                if viz:
-                    color = [random.randint(50, 255) for _ in range(3)]
-                    rr.log(f"plane_{segment_id}", rr.Points3D(best_inliers, colors=color, radii=0.1))
-
-                # Remove inliers from remaining points
-                remaining_mask = ~np.isin(remaining_pts, best_inliers).all(axis=1)
-                remaining_pts = remaining_pts[remaining_mask]
-                segment_id += 1
+            # Remove inliers from remaining points
+            remaining_mask = ~np.isin(remaining_pts, best_inliers).all(axis=1)
+            remaining_pts = remaining_pts[remaining_mask]
+            segment_id += 1
         else:
             break
 
