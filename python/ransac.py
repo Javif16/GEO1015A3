@@ -10,7 +10,6 @@ def detect(lazfile, params, viz=False):
     max_iterations = params["k"]
     epsilon = params["epsilon"]
     min_score = params["min_score"]
-    cluster_radius = params.get("cluster_radius", epsilon * 2)
 
     # Extract points from the LAZ file
     pts = np.vstack((lazfile.x, lazfile.y, lazfile.z)).transpose()
@@ -22,7 +21,6 @@ def detect(lazfile, params, viz=False):
         rr.log("allpts", rr.Points3D(pts, colors=[78, 205, 189], radii=0.1))
 
     def fit_plane(points):
-        """Fit a plane using SVD."""
         centroid = np.mean(points, axis=0)
         _, _, vh = np.linalg.svd(points - centroid)
         normal = vh[2, :]
@@ -30,7 +28,6 @@ def detect(lazfile, params, viz=False):
         return np.append(normal, d)
 
     def ransac_plane(points, threshold, iterations):
-        """RANSAC for plane detection."""
         best_inliers = []
         best_params = None
 
@@ -50,26 +47,42 @@ def detect(lazfile, params, viz=False):
 
         return best_params, np.array(best_inliers)
 
+    def remove_inliers(points, inliers):
+        tree = KDTree(points)
+        _, indices = tree.query(inliers, distance_upper_bound=epsilon)
+        indices = indices[indices < points.shape[0]]  # Filter out invalid indices
+        mask = np.ones(points.shape[0], dtype=bool)
+        mask[indices] = False
+        return points[mask]
+
     remaining_pts = np.copy(pts)
 
     while remaining_pts.shape[0] > min_score:
+        # Run RANSAC to detect a plane
         best_params, best_inliers = ransac_plane(remaining_pts, epsilon, max_iterations)
 
+        # If valid inliers are found
         if len(best_inliers) > min_score:
             # Assign a segment ID to the inliers
-            for point in best_inliers:
-                idx = np.where((pts == point).all(axis=1))[0]
-                segment_ids[idx] = segment_id
+            tree = KDTree(pts)
+            _, idx = tree.query(best_inliers, distance_upper_bound=epsilon)
+            valid_indices = idx[idx < pts.shape[0]]
+            segment_ids[valid_indices] = segment_id
 
             if viz:
                 color = [random.randint(50, 255) for _ in range(3)]
                 rr.log(f"plane_{segment_id}", rr.Points3D(best_inliers, colors=color, radii=0.1))
 
             # Remove inliers from remaining points
-            remaining_mask = ~np.isin(remaining_pts, best_inliers).all(axis=1)
-            remaining_pts = remaining_pts[remaining_mask]
+            remaining_pts = remove_inliers(remaining_pts, best_inliers)
+
+            # Recalculate the best plane for the remaining points
+            best_params, best_inliers = ransac_plane(remaining_pts, epsilon, max_iterations)
+
+            # Increment segment ID for the next plane
             segment_id += 1
         else:
+            # Break if no more valid planes can be detected
             break
 
     # Combine points with their segment IDs
